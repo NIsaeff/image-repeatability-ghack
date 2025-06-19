@@ -1,99 +1,94 @@
-# app.py
+# app.py – Final Working Version with gpt-image-1
+# Requirements: pip install streamlit pillow openai python-dotenv
+
+import os
 import io
-import time
-import requests
+import base64
+import json
+import tempfile
 from PIL import Image
+
+from dotenv import load_dotenv, find_dotenv
+load_dotenv(find_dotenv())
+
 import streamlit as st
+from openai import OpenAI
 
-# --------------------------------------------------
-#  Page & global style
-# --------------------------------------------------
-st.set_page_config(
-    page_title="🔮 One-Click Ad Image Generator",
-    layout="centered",
-    initial_sidebar_state="collapsed",
-)
+# ──────────────────────────────────────────────────────────────────────
+# 🔑 API KEY
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    st.error("Please set OPENAI_API_KEY in .env or environment.")
+    st.stop()
 
-# --- light modern look ---
-st.markdown(
-    """
-    <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
-    .stButton>button {
-        border: 1px solid #e5e7eb; border-radius: 8px; padding: 0.6rem 1.4rem;
-        background: #ffffff; font-weight: 600; transition: all 0.2s ease;
-    }
-    .stButton>button:hover { background: #f3f4f6; border-color:#d1d5db; }
-    .preset { width: 100%; }
-    .title { font-size: 2.3rem; font-weight: 800; margin-bottom:0.1rem; }
-    .subtitle { color:#6b7280; font-size: 0.95rem; margin-top:-0.3rem; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-# --------------------------------------------------
-#  Helper to hit your model
-# --------------------------------------------------
-BACKEND_URL = "http://localhost:8000/generate"  # <<—-- replace
-
-def run_inference(image_bytes: bytes, prompt: str) -> Image.Image:
-    """
-    Sends the original image & prompt to your model and returns a PIL.Image.
-    Assumes the backend returns raw bytes of the final image.
-    """
-    files = {"file": image_bytes}
-    data = {"prompt": prompt}
-    # r = requests.post(BACKEND_URL, files=files, data=data)
-    # r.raise_for_status()
-    # return Image.open(io.BytesIO(r.content))
-
-    # --- stub while backend is not wired ---
-    time.sleep(2)
-    return Image.open(io.BytesIO(image_bytes))  # echo original until model ready
-
-
-# --------------------------------------------------
-#  UI
-# --------------------------------------------------
-st.markdown('<div class="title">📸 Ad Image Transformer</div>', unsafe_allow_html=True)
-st.markdown(
-    '<div class="subtitle">Upload a photo, pick a style (or type your own) and get a polished ad-ready image in seconds.</div>',
-    unsafe_allow_html=True,
-)
-
-uploaded = st.file_uploader("Choose an image", type=["png", "jpg", "jpeg"])
-
-preset_col1, preset_col2, preset_col3 = st.columns(3)
-
-# --- preset prompt handlers ---
-preset_map = {
-    "Modern": "Ultra-clean, minimalist, bright studio lighting, crisp product focus, white backdrop.",
-    "Retro": "Vintage 1970s magazine aesthetic, warm film grain, subtle halftone texture, soft vignette.",
-    "Cinematic": "High-contrast teal-and-orange grade, shallow depth of field, dramatic rim lighting."
+# ──────────────────────────────────────────────────────────────────────
+# 🎨 Prompt Options
+PRESET_PROMPTS = {
+    "Modern": "Sleek, minimalist ad style—clean lighting, white background. Preserve framing.",
+    "Retro": "1970s retro magazine look—warm grain, gentle vignette. Keep composition.",
+    "Cinematic": "Teal-and-orange cinematic lighting, high dynamic range. Movie-style finish.",
 }
 
-for label, col in zip(preset_map.keys(), [preset_col1, preset_col2, preset_col3]):
+# ──────────────────────────────────────────────────────────────────────
+# 🧠 Run Inference — gpt-image-1 (returns PIL Image + JSON)
+def run_inference(image_bytes: bytes, prompt: str) -> tuple[Image.Image, dict]:
+    im = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+    side = max(im.size)
+    if im.width != im.height:
+        square = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+        square.paste(im, ((side - im.width) // 2, (side - im.height) // 2))
+        im = square
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_img:
+        im.save(tmp_img, format="PNG")
+        img_path = tmp_img.name
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_mask:
+        Image.new("RGBA", im.size, (0, 0, 0, 0)).save(tmp_mask, format="PNG")
+        mask_path = tmp_mask.name
+
+    result = client.images.edit(
+        model="gpt-image-1",
+        image=open(img_path, "rb"),
+        mask=open(mask_path, "rb"),
+        prompt=prompt,
+        n=1,
+        size="1024x1024",
+        response_format="b64_json",
+    )
+
+    b64 = result.data[0].b64_json
+    image = Image.open(io.BytesIO(base64.b64decode(b64)))
+    return image, result.model_dump()
+
+# ──────────────────────────────────────────────────────────────────────
+# 🌐 Streamlit UI
+st.set_page_config(page_title="Ad Image Transformer", layout="centered")
+st.title("📸 Ad Image Transformer")
+st.caption("Upload a photo, pick a style or write your own prompt.")
+
+uploaded = st.file_uploader("Upload PNG or JPG", type=["png", "jpg", "jpeg"])
+
+cols = st.columns(3)
+for key, col in zip(PRESET_PROMPTS, cols):
     with col:
-        if st.button(label, key=label, help=preset_map[label], use_container_width=True):
-            st.session_state["chosen_prompt"] = preset_map[label]
+        if st.button(key):
+            st.session_state["preset_prompt"] = PRESET_PROMPTS[key]
 
-# --- custom prompt ---
-custom = st.text_input("…or write your own prompt", placeholder="e.g. Vibrant neon cyberpunk billboard, night cityscape, rain reflections")
+custom_prompt = st.text_input("…or enter your own prompt")
+prompt = custom_prompt.strip() or st.session_state.get("preset_prompt", "")
 
-prompt = st.session_state.get("chosen_prompt") if custom == "" else custom.strip()
-st.write("")  # spacing
+if st.button("✨ Generate", disabled=not uploaded or not prompt):
+    with st.spinner("Generating… please wait"):
+        image, metadata = run_inference(uploaded.read(), prompt)
 
-# --- generate action ---
-disabled = uploaded is None or prompt == ""
-go = st.button("✨ Generate", disabled=disabled, type="primary")
+        st.image(image, caption="🎨 Final Result", use_container_width=True)
 
-if go and uploaded and prompt:
-    with st.spinner("Transforming… hang tight!"):
-        result_img = run_inference(uploaded.read(), prompt)
-        st.success("Done! Preview below ⤵")
-        st.image(result_img, use_column_width="auto", caption="Final Creative")
-        # Optional download
+        # Download PNG
         buf = io.BytesIO()
-        result_img.save(buf, format="PNG")
-        st.download_button("Download PNG", data=buf.getvalue(), file_name="ad_image.png", mime="image/png")
+        image.save(buf, format="PNG")
+        st.download_button("Download PNG", data=buf.getvalue(), file_name="output.png", mime="image/png")
+
+        # Download JSON
+        st.download_button("Download Metadata JSON", data=json.dumps(metadata, indent=2), file_name="metadata.json", mime="application/json")
